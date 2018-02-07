@@ -74,7 +74,6 @@ def build_concatExprTree(list_):
 
 def make_expr(expr):
     operandMap = {"*" : OPType.Star, "+" : OPType.Plus, "?" : OPType.Questionmark}
-    specialCharMap = {":num:" : "0|1|2|3|4|5|6|7|8|9", ":capalpha:" : "A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q|R|S|T|U|V|W|X|Y|Z", ":camalpha:" : "a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z", ":alpha:" : ":capalpha: | :camalpha:"  }
     def inner(exprList):
         # precedence: *,+: unary; @:1; |:0
         if not exprList:
@@ -87,10 +86,6 @@ def make_expr(expr):
                 treeList.append(Expression(OPType.Symbol,symbol=subExpr))
                 handleAsSymbol = False
                 continue
-
-            if subExpr.startswith(":"):
-                convToList = tokenize(specialCharMap[subExpr])
-                treeList.append(inner(convToList))
 
             elif subExpr.startswith("("):
                 convToList = tokenize(subExpr[1:len(subExpr) - 1])
@@ -210,16 +205,22 @@ class State:
                 return      
 
 class NameGen:
-    def __init__(self, keepSetAsName):
+    def __init__(self, cache=False):
         self.counter = -1
-        self.keep = keepSetAsName
+        self.cache = cache
+        self.nameCache = {}
     def gen_state_name(self,frozenSetToBeNamed):
         #assert type(frozenSetToBeNamed) is frozenset()
-        if self.keep:
-            return str(frozenSetToBeNamed).replace("frozenset","").replace("(","").replace(")","").replace("'","")
+        if self.cache:
+            if frozenSetToBeNamed in self.nameCache:
+                return self.nameCache[frozenSetToBeNamed]
+            else:
+                self.counter += 1
+                self.nameCache[frozenSetToBeNamed] = str(self.counter)
+                return str(self.counter)
         else:
             self.counter += 1
-            return str(self.counter)
+            return str(self.counter) 
 
 
 class TransitionTable:
@@ -319,9 +320,12 @@ class TransitionTable:
         return generated
 
     # TODO: Improve code, it's just ugly. Variables are badly named.
-    def remove_epsilon_trans(self, keepSetAsName = False):
+    def remove_epsilon_trans(self):
+        print("         Computing E-Closure...")
         self = self.to_Estar()
-        gen = NameGen(keepSetAsName)
+        print("         Done")
+        print("         Removing modified Epsilon Transitions...")
+        gen = NameGen()
         nfa = TransitionTable()
         activeSimulatedStates = set()
         generatedStates = {}
@@ -357,24 +361,74 @@ class TransitionTable:
                             stateToSetName = generatedStates[stateToSet]
                             nfa.make_transition(stateFromSetName,stateToSetName,trans,isFromAccept,isFromInit,isToAccept,isToInit,labelFromSet,labelToSet)
                             
-
+        print("         Done")
         return nfa
 
     def gen_label(self,states):
         label = ""
         for state in states:
-            label+=self.labelMap[state]+" "
-        return label.strip() 
+            if not self.labelMap[state] in label:
+                label+=self.labelMap[state]+","
+        return label[0:-1] 
+
+    def to_min_dfa(self):
+        self = self.to_dfa()
+        print("     Number of states:", len(self.stateNames))
+        draw_fa(self,"kkkk")
+        print("     minimizing...")
+        # First compute the states
+        W = {frozenset(self.acceptStates),frozenset(filter(lambda x: not x in self.acceptStates, self.stateNames.keys())) } 
+        W_changed = True
+        while W_changed:
+            W_changed = False
+            for transVar in self.transNames.keys():
+                A = W.pop()
+                A_behav1 = {q for q in A if self.get(q,transVar) and next(iter(self.get(q,transVar))) in A}                            
+                A_behav2 = A.difference(A_behav1)
+                #print(W)
+                W_changed = (A_behav1 and A_behav2) or W_changed  # If either A' or A'' is empty, then W_changed is set to False except W already changed (then it's True)
+                if A_behav1: W.add(frozenset(A_behav1))
+                if A_behav2: W.add(frozenset(A_behav2))
+        print("     Done")
+        print("     New number of states:",len(W))
+
+        # Now make transitions:
+        minDfa = TransitionTable()
+        gen = NameGen(True)
+        for newFrom in W:
+            newFromName = gen.gen_state_name(newFrom)
+            isFromInit = any(x in self.initStates for x in newFrom)
+            isFromAccept = any(x in self.acceptStates for x in newFrom)
+            for from_ in newFrom:
+                for transVar in self.transNames.keys():
+                    to = self.get(from_,transVar)
+                    if not to:
+                        continue
+                    for newToCand in W:
+                        toItem = next(iter(to))
+                        if toItem in newToCand:
+                            isToInit = any(x in self.initStates for x in newToCand)
+                            isToAccept = any(x in self.acceptStates for x in newToCand)
+                            newToCandName = gen.gen_state_name(frozenset(newToCand))
+                            minDfa.make_transition(newFromName,newToCandName, transVar,isFromAccept,isFromInit,isToAccept,isToInit,self.gen_label(newFrom), self.gen_label(newToCand))
+        draw_fa(minDfa)
+
+        return minDfa
+
+        
 
     #Similar to epsilon removal, but now i don't have to take epsilon transitions anymore.
     #TODO: Maybe merge both algorithms? Code redundancy is an issue here.
     #TODO: Possible even slower because I have to go through all the transition variables!
-    def to_dfa(self, keepStateNames = False):
-        gen = NameGen(keepStateNames)
+    def to_dfa(self):
+        gen = NameGen()
         frozenInitStates = frozenset(self.initStates)
         activeSimulatedStates = {frozenInitStates}
         generatedStates = {frozenInitStates : gen.gen_state_name(frozenInitStates)}
-        self = self.remove_epsilon_trans(False) 
+        print("     Removing Epsilon Transitions...")
+        self = self.remove_epsilon_trans() 
+        print("     Done")
+        print("     Computing DFA...")
         dfa = TransitionTable()
 
         while activeSimulatedStates:
@@ -406,9 +460,8 @@ class TransitionTable:
                     newStateSetName = generatedStates[frozenCollectedStates]
                     dfa.make_transition(stateFromSetName,newStateSetName,trans,isFromAccept,isFromInit,isToAccept,isToInit,fromSetLabel,toSetLabel)
 
-        
+        print("     Done")
         return dfa     
-
 
 class NFA:
     def __init__(self):
@@ -749,7 +802,7 @@ class CPPLexer:
                 transition += "c = provider.next();\n"
 
             for to, transVar in self.dfaTable.iterateTransitionsFor(state):
-                transition += "if (c == '{0}') goto {1};\n".format(transVar,int(to))
+                transition += "if (c == '{0}') goto state{1};\n".format(transVar,int(to))
             
 
             if isAccept: # None of the previous transitions matched. If it is an accepting state, accept the string and return 
@@ -792,7 +845,7 @@ def emit_code(tokenSpec,pathToSave):
     print("Done")
     print("Tranforming NFA to DFA...")
 
-    dfaTable = enfa.transitionTable.to_dfa()
+    dfaTable = enfa.transitionTable.to_min_dfa()
     print("Done")
     print("Emitting CPP Code...")
     #draw_fa(dfaTable)
@@ -807,7 +860,7 @@ def emit_code(tokenSpec,pathToSave):
 
 
 
-a=parse_source("C:/Users/Jan_M720/Desktop/TokenMoses.txt")
+a=parse_source("C:/Users/Jan_M720/Desktop/TestSpec.txt")
 emit_code(a,"C:/Users/Jan_M720/Desktop/TestLexer.h")
 
 
