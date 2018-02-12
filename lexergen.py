@@ -1,5 +1,4 @@
 from enum import Enum
-from graphviz import Graph, Digraph
 from copy import deepcopy
 from itertools import chain
 from functools import reduce
@@ -307,6 +306,7 @@ class TransitionTable:
                     if not to in Estar:
                         Estar.add(to)
                         activeStates.append(to)
+        
             return Estar
 
         deferred = []
@@ -374,7 +374,6 @@ class TransitionTable:
     def to_min_dfa(self):
         self = self.to_dfa()
         print("     Number of states:", len(self.stateNames))
-        draw_fa(self,"kkkk")
         print("     minimizing...")
         # First compute the states
         W = {frozenset(self.acceptStates),frozenset(filter(lambda x: not x in self.acceptStates, self.stateNames.keys())) } 
@@ -384,8 +383,6 @@ class TransitionTable:
             for transVar in self.transNames.keys():
                 A = W.pop()
                 A_behav1 = {q for q in A if self.get(q,transVar) and next(iter(self.get(q,transVar))) in A}                            
-                A_behav2 = A.difference(A_behav1)
-                #print(W)
                 W_changed = (A_behav1 and A_behav2) or W_changed  # If either A' or A'' is empty, then W_changed is set to False except W already changed (then it's True)
                 if A_behav1: W.add(frozenset(A_behav1))
                 if A_behav2: W.add(frozenset(A_behav2))
@@ -410,8 +407,8 @@ class TransitionTable:
                             isToInit = any(x in self.initStates for x in newToCand)
                             isToAccept = any(x in self.acceptStates for x in newToCand)
                             newToCandName = gen.gen_state_name(frozenset(newToCand))
-                            minDfa.make_transition(newFromName,newToCandName, transVar,isFromAccept,isFromInit,isToAccept,isToInit,self.gen_label(newFrom), self.gen_label(newToCand))
-        draw_fa(minDfa)
+                            finalTransVar = transVar if not isToAccept else transVar + ","+self.labelMap[toItem]
+                            minDfa.make_transition(newFromName,newToCandName, finalTransVar,isFromAccept,isFromInit,isToAccept,isToInit,self.gen_label(newFrom), self.gen_label(newToCand))
 
         return minDfa
 
@@ -523,7 +520,6 @@ class NFA:
             stateIn.connectTo(other.initState, trans.transVar)
         
         self.acceptState = other.acceptState
-        #draw_fa(self,"after concat")
 
     def concatV1(self, other):
         self.acceptState.connectTo(other.initState)
@@ -538,18 +534,12 @@ class NFA:
         self.copy(out)
 
     def starV1(self):
-        #draw_fa(self, "start star")
         out = NFA()
         out.initState.connectTo(out.acceptState)
-        #draw_fa(out, "outinit connect to outaccept")
         out.initState.connectTo(self.initState)
-        #draw_fa(out, "outinit connect to selfinit")
         self.acceptState.connectTo(self.initState)
-        #draw_fa(self, "selfaccept to selfinit")
         self.acceptState.connectTo(out.acceptState)
-        #draw_fa(out, "selfaccept to outaccept")
         self.copy(out)
-        #draw_fa(out, "after copy");
 
     def starV2(self):
         out = NFA()
@@ -559,11 +549,8 @@ class NFA:
         self.copy(out)
 
     def plus(self):
-        #draw_fa(self,"Start op")
         self.starV1()
-        #draw_fa(self,"Starred")
         self.initState.disconnect(self.acceptState,":e:")
-        #draw_fa(self,"Disconnect thingy")
 
     def symbol(self, a):
         self.initState.connectTo(self.acceptState, a)
@@ -597,7 +584,7 @@ class NFA:
                                
 
 def make_nfa(expr):
-    if expr.isConcat():  # st
+    if expr.isConcat():  
         dfaLhs = make_nfa(expr.lhs)
         dfaRhs = make_nfa(expr.rhs)
         dfaLhs.concatV2(dfaRhs)
@@ -667,6 +654,7 @@ def draw_expr(expr, title="Standard Expression"):
 
 #TODO: Draw based on transition table, don't do a dfs!
 def draw_fa(ttable, title="Standard FA"):
+    from graphviz import Graph, Digraph
     graph = Digraph(title, filename=title)
     graph.attr(rankdir='LR', size="50")
    
@@ -746,7 +734,7 @@ class CPPLexer:
         public:
             Lexer(TSourceCodeProvider&& provider_) : provider(std::move(provider_)) 
             {
-                start_char = provider.Next();
+                next_char = provider.Next();
             }
 
             TokenInfo Eat()
@@ -764,14 +752,14 @@ class CPPLexer:
         private:
             TSourceCodeProvider provider;
             TokenInfo current_token_info;
-            char start_char;
+            char next_char;
             void assign_next_token()
             {
-                char c;
+                char c = next_char;
                 std::string matched_word;
-                std::string filename = provider.current_filename();
-                size_t startedLine = provider.current_line();
-                size_t startedPosition = provider.current_cursor_pos();
+                std::string filename = provider.CurrentFilename();
+                size_t startedLine = provider.CurrentLine();
+                size_t startedPosition = provider.CurrentCursorPos();
                 <definition_assign_next_token>
             }
         };"""
@@ -792,41 +780,36 @@ class CPPLexer:
 
     def genCode(self):
         stateCode = []
-        tokenTypeCode = []
+        tokenTypeCode = set()
         for isInit,isAccept,state,label in self.dfaTable.iterateStates():
             # state is a unique name, label isn't; If accepting state the label should go into the enum defintions.
             transition = "state{0}:\n".format(state)
-            if isInit:
-                transition += "c = start_char;\n"
-            else:
-                transition += "c = provider.next();\n"
-
-            for to, transVar in self.dfaTable.iterateTransitionsFor(state):
-                transition += "if (c == '{0}') goto state{1};\n".format(transVar,int(to))
-            
+            for to, transitionInfo in self.dfaTable.iterateTransitionsFor(state):
+                if not to in self.dfaTable.acceptStates:  
+                    transition += "if (c == '{0}') {{c = provider.Next();goto state{1};}}\n".format(transitionInfo,int(to))
+                else:
+                    separatingCommaPos = transitionInfo.rfind(",")
+                    transVar = transitionInfo[0:separatingCommaPos]
+                    tokenToPush = transitionInfo[separatingCommaPos+1:len(transitionInfo)]
+                    transition += "if (c == '{0}') {{c = provider.Next();pushedToken = TokenType::{1}; goto state{2};}}\n".format(transVar,tokenToPush,to)
+                    tokenTypeCode.add(tokenToPush)
 
             if isAccept: # None of the previous transitions matched. If it is an accepting state, accept the string and return 
                 transition += """
-                                if (!isspace(c)) start_char = c; 
-                                current_token_info = {{ TokenType::{0},  matched_word, filename, startedLine, startedPosition }}; 
-                                return;""".format(label)
-                tokenTypeCode.append("{0},\n\t".format(label))
+                                if (isspace(c)) while( isspace(c=provider.Next()));
+                                current_token_info = { pushedToken,  matched_word, filename, startedLine, startedPosition }; 
+                                next_char = c;
+                                return;"""
             else:
                 transition += "assert(false);" #Proper error handling soon.
             transition+="\n\n\n"
-
             stateCode.append(transition)
         
         methodDefinition = "".join(stateCode)
-        tokenTypeDefinition = "".join(tokenTypeCode)
-        return (methodDefinition,tokenTypeDefinition[0:-2])
+        tokenTypeDefinition = ",".join(tokenTypeCode)
+        return (methodDefinition,tokenTypeDefinition)
 
-        
-
-
-
-
-        
+    
 
 def emit_code(tokenSpec,pathToSave):
     automataList = []
@@ -854,26 +837,10 @@ def emit_code(tokenSpec,pathToSave):
     genLexer.save(pathToSave)
     
 
+def gen_lexer(specFile, outFile):
+    a = parse_source(specFile)
+    emit_code(a,outFile)
 
-
-
-
-
-
-a=parse_source("C:/Users/Jan_M720/Desktop/TestSpec.txt")
-emit_code(a,"C:/Users/Jan_M720/Desktop/TestLexer.h")
-
-
-"""a = make_expr("ret|re(te)*")
-#a = make_expr("a|a|b*")
-b = make_nfa(a)
-draw_expr(a, "Expression")
-t = b.transitionTable
-draw_fa(t, "eNFA")
-draw_fa(t.to_Estar(),"Estar") 
-draw_fa(t.remove_epsilon_trans(False),"NFA")
-draw_fa(t.to_dfa(False),"DFA!!")
-print("END")"""
 
 
 
