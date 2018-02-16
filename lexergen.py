@@ -3,7 +3,7 @@ from copy import copy, deepcopy
 from itertools import chain
 from functools import reduce
 from collections import deque
-
+import string
 
 class OPType(Enum):
     Star = 1
@@ -404,15 +404,28 @@ class TransitionTable:
         print("         Done")
         return nfa
 
-    def gen_label(self, states):
-        label = ""
-        for state in states:
-            if not self.labelMap[state] in label:
-                label += self.labelMap[state] + ","
-        return label[0:-1]
+    def gen_label(self, states, cmpFunc=None):
+        if cmpFunc:
+            maxItem = ""
+            maxC = -1
+            for state in states:
+                label = self.labelMap[state]
+                if label == "": continue
+                if cmpFunc(label) > maxC:
+                    maxC = cmpFunc(label)
+                    maxItem = label
+            #print(maxItem)
+            return maxItem
 
-    def to_min_dfa(self):
-        self = self.to_dfa()
+        else: # Fallback
+            label = ""
+            for state in states:
+                if not self.labelMap[state] in label:
+                    label += self.labelMap[state] + ","
+            return label[0:-1]
+
+    def to_min_dfa(self,precedenceRules):
+        self = self.to_dfa(precedenceRules)
         print("     minimizing...")
         # First compute the states
         W = deque()
@@ -423,6 +436,11 @@ class TransitionTable:
         unusefulRounds = 0
         while unusefulRounds < len(W):
             A = W[-1]
+            if not A:
+                W.pop()
+                W.appendleft(A)
+                unusefulRounds += 1
+                continue
             legalTransitions = {}
             behav1 = set()
             beginState = next(iter(A))
@@ -431,10 +449,17 @@ class TransitionTable:
                 if not to:
                     legalTransitions[transVar] = {}
                     continue
+                added = False
+                to = next(iter(to))
                 for k in W:
-                    if next(iter(to)) in k:
-                        legalTransitions[transVar] = k
+                    if to in k:
+                        legalTransitions[transVar] = (k,self.labelMap[to])
+                        added = True
                         break
+                if not added:
+                    print(type(to),W)
+                    pass
+
 
             for q in A:
                 if self.isQBehaviorLegal(q, W, legalTransitions):
@@ -479,7 +504,7 @@ class TransitionTable:
                                 isFromAccept, isFromInit, isToAccept, isToInit,
                                 self.gen_label(newFrom),
                                 self.gen_label(newToCand))
-
+        #draw_fa(minDfa,"Min DFA")
         return minDfa
 
     def isQBehaviorLegal(self, q, W, legalTransitions):
@@ -492,18 +517,20 @@ class TransitionTable:
                     return False
                 continue
 
+            to = next(iter(to))
             for k in W:
-                if next(iter(to)) in k:
+                if to in k:
                     setThatContainsTo = k
                     break
-            if legalTransitions[transVar] != setThatContainsTo:
+            if legalTransitions[transVar] != (setThatContainsTo,self.labelMap[to]):
                 return False
         return True
 
     #Similar to epsilon removal, but now i don't have to take epsilon transitions anymore.
     #TODO: Maybe merge both algorithms? Code redundancy is an issue here.
     #TODO: Possible even slower because I have to go through all the transition variables!
-    def to_dfa(self):
+    def to_dfa(self, precedenceRules):
+        cmpFunc = lambda x: precedenceRules[x]
         gen = NameGen()
         frozenInitStates = frozenset(self.initStates)
         activeSimulatedStates = {frozenInitStates}
@@ -521,7 +548,7 @@ class TransitionTable:
             stateFromSetName = generatedStates[stateFromSet]
             isFromAccept = any(x in self.acceptStates for x in stateFromSet)
             isFromInit = any(x in self.initStates for x in stateFromSet)
-            fromSetLabel = self.gen_label(stateFromSet)
+            fromSetLabel = self.gen_label(stateFromSet,cmpFunc)
             for trans in self.transNames:
                 collectedSimulatedStates = set()
                 isToAccept = False
@@ -535,7 +562,7 @@ class TransitionTable:
                                      for x in stateToSet) or isToAccept
                     isToInit = any(x in self.initStates
                                    for x in stateToSet) or isToInit
-                    toSetLabel += self.gen_label(stateToSet)
+                    if isToAccept: toSetLabel += self.gen_label(stateToSet,cmpFunc)
                 if not collectedSimulatedStates: continue
                 frozenCollectedStates = frozenset(collectedSimulatedStates)
                 if not frozenCollectedStates in generatedStates:
@@ -555,7 +582,7 @@ class TransitionTable:
 
         print("     Done")
         print("     Number of states:", len(dfa.stateNames))
-        draw_fa(dfa,"DFA")
+        #draw_fa(dfa,"DFA")
         return dfa
 
 
@@ -799,14 +826,42 @@ def extract(text, kw):
 
 def parse_source(filename):
     spec = open(filename).read()
-    ids = extract(spec, "id")
-    ids = map(lambda x: (x.capitalize(), x), ids)
-    defaults = extract(spec, "default")
-    specialTokens = extract(spec, "expansion")
+    rules = extract(spec, "rules")
+    specialTokens = extract(spec, "expansions")
     toTuple = lambda transList: map(lambda x: (x[0].replace(" ",""), x[1].replace(" ","")),map(lambda x: x.split("-",maxsplit=1), transList))
-    defaults = toTuple(defaults)
+    rules = list(toTuple(rules))
+
+    precedeneRules = {}
+    counter = len(rules)
+    for rule in rules:
+        key,_ = rule
+        precedeneRules[key] = counter
+        counter -= 1 
     specialTokens = {x: y for x, y in toTuple(specialTokens)}
-    return (chain(ids, defaults), specialTokens)
+    return (rules, specialTokens, precedeneRules)
+
+
+class TransitionOptimizer:
+    def __init__(self, optimFunc, chars):
+
+        self.counter = 0
+        self.savedExpressions = []
+        self.optimFunc = optimFunc
+        self.sumOfChars = sum(map(lambda x: ord(x),chars))
+    
+    def check(self, x):
+        if self.optimFunc(x):
+            self.counter += ord(x)
+            self.savedExpressions.append("c == '{0}'".format(x))
+            return True
+        return False
+    
+    def optimTransition(self, exprIfOptim):
+        if self.counter == self.sumOfChars:
+            return [exprIfOptim]
+        else:
+            return self.savedExpressions
+
 
 
 class CPPLexer:
@@ -903,38 +958,21 @@ class CPPLexer:
     def getOptimizedCode(self, key, charsToCompare):
         to, pushedToken = key
         # Gen optimized expressions
-        digitCounter = 0
-        digitExpressions = []
-
-        alphabetCounter = 0
-        alphaExpressions = []
+        # TODO: Test for upper and lower case too!!
+        
+        digitOptim = TransitionOptimizer(lambda x: x.isdigit(), string.digits)
+        uppercaseAlphaOptim = TransitionOptimizer(lambda x: x.isupper(), string.ascii_uppercase)
+        lowercaseAlphaOptim = TransitionOptimizer(lambda x: x.islower(), string.ascii_lowercase)
 
         expressions = []
 
         for x in charsToCompare:
-            if x.isdigit():
-                num = ord(x)
-                digitCounter += num
-                digitExpressions.append("c == '{0}'".format(x))
-            elif x.isalpha():
-                unicodeInt = ord(x)
-                alphabetCounter += unicodeInt
-                alphaExpressions.append("c == '{0}'".format(x))
-            else:
+            if not (digitOptim.check(x) or uppercaseAlphaOptim.check(x) or lowercaseAlphaOptim.check(x)):
                 expressions.append("c == '{0}'".format(x))
 
-        if alphabetCounter == 4862:  # Sum of all ascii_letters.
-            alphaExpressions = ["isalpha(c)"]
-        elif alphabetCounter > 4862:
-            raise RuntimeError("This shouldn't happen as the fa is a dfa!")
-        
-        if digitCounter == 525:  # sum of "1"..."9" (unicode)
-            digitExpressions = ["isdigit(c)"]
-        elif digitCounter > 525:
-            raise RuntimeError("This shouldn't happen as the fa is a dfa!")
-
-        expressions.extend(alphaExpressions)
-        expressions.extend(digitExpressions)
+        expressions.extend(digitOptim.optimTransition("isdigit(c)"))
+        expressions.extend(uppercaseAlphaOptim.optimTransition("isupper(c)"))
+        expressions.extend(lowercaseAlphaOptim.optimTransition("islower(c)"))
 
         out = "if("
         for expr in expressions:
@@ -952,7 +990,7 @@ class CPPLexer:
     def genCode(self):
         stateCode = []
         tokenTypeCode = set()
-        draw_fa(self.dfaTable)
+        #draw_fa(self.dfaTable)
         for isInit, isAccept, state, label in self.dfaTable.iterateStates():
             transitionExpressions = {}
             optimCode = "state{0}:\n".format(state)
@@ -970,8 +1008,10 @@ class CPPLexer:
                                     current_token_info = { pushedToken,  matched_word, filename, startedLine, startedPosition }; 
                                     next_char = c;
                                     return;\n\n"""
-            stateCode.append(optimCode)
-
+            if isAccept:
+                stateCode.append(optimCode)
+            else:
+                stateCode.insert(0,optimCode)
 
         return ("".join(stateCode), ",".join(tokenTypeCode))
 
@@ -979,8 +1019,8 @@ class CPPLexer:
 def emit_code(tokenSpec, pathToSave):
     automataList = []
     print("Creating sub NFAs...")
-    spec, specialTokenMap = tokenSpec
-    for i in spec:
+    rules, specialTokenMap,rulesPrecedence = tokenSpec
+    for i in rules:
         label, expr = i
         enfa = make_nfa(make_expr(expr, specialTokenMap))
         enfa.acceptState.label = label
@@ -993,7 +1033,7 @@ def emit_code(tokenSpec, pathToSave):
         enfa.union(i)
     print("Done")
     print("Tranforming NFA to DFA...")
-    dfaTable = enfa.transitionTable.to_min_dfa()
+    dfaTable = enfa.transitionTable.to_min_dfa(rulesPrecedence)
     print("Done")
     print("Emitting CPP Code...")
     genLexer = CPPLexer(dfaTable)
