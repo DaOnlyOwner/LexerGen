@@ -1,7 +1,9 @@
 from enum import Enum
-from copy import deepcopy
+from copy import copy, deepcopy
 from itertools import chain
 from functools import reduce
+from collections import deque
+
 
 class OPType(Enum):
     Star = 1
@@ -22,8 +24,8 @@ def tokenize(txt):
     for c in txt:
         if handleAsSymbol or c == '°':
             out.append(c)
-            handleAsSymbol =  not handleAsSymbol
-            continue           
+            handleAsSymbol = not handleAsSymbol
+            continue
 
         if colonActive:
             specialChar += c
@@ -71,8 +73,9 @@ def build_concatExprTree(list_):
     return Expression(OPType.Concat, lhs, rhs)
 
 
-def make_expr(expr):
-    operandMap = {"*" : OPType.Star, "+" : OPType.Plus, "?" : OPType.Questionmark}
+def make_expr(expr, specialTokenMap={}):
+    operandMap = {"*": OPType.Star, "+": OPType.Plus, "?": OPType.Questionmark}
+
     def inner(exprList):
         # precedence: *,+: unary; @:1; |:0
         if not exprList:
@@ -81,22 +84,32 @@ def make_expr(expr):
         handleAsSymbol = False
         for i in range(len(exprList)):
             subExpr = exprList[i]
+
             if handleAsSymbol:
-                treeList.append(Expression(OPType.Symbol,symbol=subExpr))
+                treeList.append(Expression(OPType.Symbol, symbol=subExpr))
                 handleAsSymbol = False
                 continue
+
+            if subExpr.startswith(":"):
+                if not subExpr in specialTokenMap:
+                    raise ValueError(
+                        "Expected an expansion for {0}, but got none".format(
+                            subExpr))
+                expansion = specialTokenMap[subExpr]
+                convToList = tokenize(expansion)
+                treeList.append(inner(convToList))
 
             elif subExpr.startswith("("):
                 convToList = tokenize(subExpr[1:len(subExpr) - 1])
                 treeList.append(inner(convToList))
-            elif subExpr.startswith("*") or subExpr.startswith("+") or subExpr.startswith("?"):
+            elif subExpr.startswith("*") or subExpr.startswith(
+                    "+") or subExpr.startswith("?"):
                 if (len(treeList) == 0):
                     raise ValueError(
                         "Expected a left hand operand when parsing */+, but none was given"
                     )
                 lhs = treeList.pop()
-                parentExpr = Expression(
-                    operandMap[subExpr[0]], lhs)
+                parentExpr = Expression(operandMap[subExpr[0]], lhs)
                 treeList.append(parentExpr)
             elif subExpr.startswith("|"):
                 if len(treeList) == 0:
@@ -159,14 +172,15 @@ class Transition:
         self.from_ = from_
         self.to = to
 
+
 # Better encapsulation?
 class State:
-    def __init__(self, isInitState = False, isAcceptState = False, label=""):
+    def __init__(self, isInitState=False, isAcceptState=False, label=""):
         self.__transIn = []  # transitions to other states
         self.__transOut = []
 
         self.__accept = isAcceptState
-        self.__init =  isInitState
+        self.__init = isInitState
         self.label = label
 
     def isAccept(self):
@@ -174,8 +188,12 @@ class State:
 
     def isInit(self):
         return self.__init
-    
-    def connectTo(self, to, transVar=":e:", allowMultipleTransitionToInitState=True, allowMultipleTransitionsFromOutputState=True):
+
+    def connectTo(self,
+                  to,
+                  transVar=":e:",
+                  allowMultipleTransitionToInitState=True,
+                  allowMultipleTransitionsFromOutputState=True):
         trans = Transition(self, to, transVar)
         self.disconnect(to, transVar)  # First of all, disconnect if connected
         if allowMultipleTransitionsFromOutputState:
@@ -194,21 +212,22 @@ class State:
         for i in self.__transIn:
             yield (i.from_, i)
 
-
     def disconnect(self, to, withTransVar):
         for index in range(len(self.__transOut)):
             trans = self.__transOut[index]
             if trans.to == to and trans.transVar == withTransVar:
                 trans.to.__transIn.remove(trans)
                 del self.__transOut[index]
-                return      
+                return
+
 
 class NameGen:
     def __init__(self, cache=False):
         self.counter = -1
         self.cache = cache
         self.nameCache = {}
-    def gen_state_name(self,frozenSetToBeNamed):
+
+    def gen_state_name(self, frozenSetToBeNamed):
         #assert type(frozenSetToBeNamed) is frozenset()
         if self.cache:
             if frozenSetToBeNamed in self.nameCache:
@@ -219,7 +238,7 @@ class NameGen:
                 return str(self.counter)
         else:
             self.counter += 1
-            return str(self.counter) 
+            return str(self.counter)
 
 
 class TransitionTable:
@@ -228,25 +247,24 @@ class TransitionTable:
         self.stateNames = {}
         self.transNames = {}
         self.acceptStates = set()
-        self.initStates  = set()
+        self.initStates = set()
         self.labelMap = {}
 
-    def assert_exists_transition(self,transVar):
+    def assert_exists_transition(self, transVar):
         if not transVar in self.transNames:
             for item in self.table:
                 item.append(set())
-            self.transNames[transVar] = len(self.table[0])-1
-            return False # didn't exist
+            self.transNames[transVar] = len(self.table[0]) - 1
+            return False  # didn't exist
         return True
- 
- 
-    def assert_exists(self,state, isAccept,isInit):
+
+    def assert_exists(self, state, isAccept, isInit):
         if not state in self.stateNames:
             to_insert = []
             for _ in self.table[0]:
                 to_insert.append(set())
             self.table.append(to_insert)
-            self.stateNames[state] = len(self.table)-1
+            self.stateNames[state] = len(self.table) - 1
             if isInit:
                 self.initStates.add(state)
             if isAccept:
@@ -254,68 +272,81 @@ class TransitionTable:
             return False
         return True
 
-    def make_transition(self,from_,to,transVar, isFromAccept=False, isFromInit=False, isToaccept = False, isToInit=False,fromLabel = "", toLabel=""):
+    def make_transition(self,
+                        from_,
+                        to,
+                        transVar,
+                        isFromAccept=False,
+                        isFromInit=False,
+                        isToaccept=False,
+                        isToInit=False,
+                        fromLabel="",
+                        toLabel=""):
         # Check if the transition variable is new
         existed = self.assert_exists_transition(transVar)
-        # Check if from_ and to exists                    
-        existed = self.assert_exists(from_,isFromAccept,isFromInit) and existed
-        existed = self.assert_exists(to,isToaccept,isToInit) and existed
+        # Check if from_ and to exists
+        existed = self.assert_exists(from_, isFromAccept,
+                                     isFromInit) and existed
+        existed = self.assert_exists(to, isToaccept, isToInit) and existed
         self.table[self.stateNames[from_]][self.transNames[transVar]].add(to)
         self.labelMap[from_] = fromLabel
-        self.labelMap[to] = toLabel 
+        self.labelMap[to] = toLabel
         return existed
-    
-    def relabel(self,state,newLabel):
+
+    def relabel(self, state, newLabel):
         self.labelMap[state] = newLabel
 
     def iterateStates(self):
         for state in self.stateNames.keys():
             label = self.labelMap[state]
-            yield (True if state in self.initStates else False,True if state in self.acceptStates else False,state,label)
+            yield (True if state in self.initStates else False, True
+                   if state in self.acceptStates else False, state, label)
 
     def iterateTransitions(self):
-        for from_,i in self.stateNames.items():
-            for transVar,j in self.transNames.items():
+        for from_, i in self.stateNames.items():
+            for transVar, j in self.transNames.items():
                 toStates = self.table[i][j]
                 for to in toStates:
-                    yield (from_, to,transVar)
+                    yield (from_, to, transVar)
 
     def iterateTransitionsFor(self, state):
-        for transVar,i in self.transNames.items():
-            for to in self.get(state,transVar):
-                yield (to,transVar)
+        for transVar, i in self.transNames.items():
+            for to in self.get(state, transVar):
+                yield (to, transVar)
 
-    def get(self,state,trans):
+    def get(self, state, trans):
         return self.table[self.stateNames[state]][self.transNames[trans]]
-   
-    # TODO: what about states that are 
-    def set(self,state,trans,var):
-        assert not(state is None)
+
+    # TODO: what about states that are
+    def set(self, state, trans, var):
+        assert not (state is None)
         assert type(var) is set
         self.table[self.stateNames[state]][self.transNames[trans]] = var
 
     def to_Estar(self):
         generated = deepcopy(self)
         generated.assert_exists_transition(":e:")
+
         def from_state(startState):
-            Estar = {startState} # E^0
+            Estar = {startState}  # E^0
             activeStates = [startState]
             while activeStates:
                 state = activeStates.pop()
-                for to in generated.get(state,":e:"):
+                for to in generated.get(state, ":e:"):
                     if not to in Estar:
                         Estar.add(to)
                         activeStates.append(to)
-        
+
             return Estar
 
         deferred = []
         for stateName in generated.stateNames.keys():
             Estar = from_state(stateName)
-            deferred.append( (lambda x,y: generated.set(x,":e:",y),stateName,Estar) )
-        
-        for update,x,y in deferred:
-            update(x,y)
+            deferred.append((lambda x, y: generated.set(x, ":e:", y),
+                             stateName, Estar))
+
+        for update, x, y in deferred:
+            update(x, y)
 
         return generated
 
@@ -329,12 +360,13 @@ class TransitionTable:
         nfa = TransitionTable()
         activeSimulatedStates = set()
         generatedStates = {}
-        for initState in self.initStates: 
-            frozenInitStateSet = frozenset(self.get(initState,":e:"))
+        for initState in self.initStates:
+            frozenInitStateSet = frozenset(self.get(initState, ":e:"))
             activeSimulatedStates.add(frozenInitStateSet)
-            generatedStates[frozenInitStateSet] = gen.gen_state_name(frozenInitStateSet)
-            
-        #Simulate 
+            generatedStates[frozenInitStateSet] = gen.gen_state_name(
+                frozenInitStateSet)
+
+        #Simulate
         while activeSimulatedStates:
             stateFromSet = activeSimulatedStates.pop()
             stateFromSetName = generatedStates[stateFromSet]
@@ -345,49 +377,80 @@ class TransitionTable:
             for state in stateFromSet:
                 for trans in self.transNames:
                     if trans == ":e:": continue
-                    nextStateSet = self.get(state,trans)
+                    nextStateSet = self.get(state, trans)
                     # now for each state try to take epsilon transitions:
                     for stateEps in nextStateSet:
-                        stateToSet = frozenset(self.get(stateEps,":e:"))
-                        isToAccept = any(x in self.acceptStates for x in stateToSet)
-                        isToInit = any(x in self.initStates for x in stateToSet)
+                        stateToSet = frozenset(self.get(stateEps, ":e:"))
+                        isToAccept = any(
+                            x in self.acceptStates for x in stateToSet)
+                        isToInit = any(
+                            x in self.initStates for x in stateToSet)
                         labelToSet = self.gen_label(stateToSet)
-                        if not stateToSet in generatedStates: 
+                        if not stateToSet in generatedStates:
                             stateToSetName = gen.gen_state_name(stateToSet)
-                            nfa.make_transition(stateFromSetName,stateToSetName,trans,isFromAccept,isFromInit,isToAccept,isToInit,labelFromSet,labelToSet)
+                            nfa.make_transition(
+                                stateFromSetName, stateToSetName, trans,
+                                isFromAccept, isFromInit, isToAccept, isToInit,
+                                labelFromSet, labelToSet)
                             activeSimulatedStates.add(stateToSet)
                             generatedStates[stateToSet] = stateToSetName
                         else:
                             stateToSetName = generatedStates[stateToSet]
-                            nfa.make_transition(stateFromSetName,stateToSetName,trans,isFromAccept,isFromInit,isToAccept,isToInit,labelFromSet,labelToSet)
-                            
+                            nfa.make_transition(
+                                stateFromSetName, stateToSetName, trans,
+                                isFromAccept, isFromInit, isToAccept, isToInit,
+                                labelFromSet, labelToSet)
+
         print("         Done")
         return nfa
 
-    def gen_label(self,states):
+    def gen_label(self, states):
         label = ""
         for state in states:
             if not self.labelMap[state] in label:
-                label+=self.labelMap[state]+","
-        return label[0:-1] 
+                label += self.labelMap[state] + ","
+        return label[0:-1]
 
     def to_min_dfa(self):
         self = self.to_dfa()
-        print("     Number of states:", len(self.stateNames))
         print("     minimizing...")
         # First compute the states
-        W = {frozenset(self.acceptStates),frozenset(filter(lambda x: not x in self.acceptStates, self.stateNames.keys())) } 
-        W_changed = True
-        while W_changed:
-            W_changed = False
-            for transVar in self.transNames.keys():
-                A = W.pop()
-                A_behav1 = {q for q in A if self.get(q,transVar) and next(iter(self.get(q,transVar))) in A}                            
-                W_changed = (A_behav1 and A_behav2) or W_changed  # If either A' or A'' is empty, then W_changed is set to False except W already changed (then it's True)
-                if A_behav1: W.add(frozenset(A_behav1))
-                if A_behav2: W.add(frozenset(A_behav2))
+        W = deque()
+        W.append(frozenset(self.acceptStates))
+        W.append(
+            frozenset(
+                set(self.stateNames.keys()).difference(self.acceptStates)))
+        unusefulRounds = 0
+        while unusefulRounds < len(W):
+            A = W[-1]
+            legalTransitions = {}
+            behav1 = set()
+            beginState = next(iter(A))
+            for transVar in self.transNames:
+                to = self.get(beginState, transVar)
+                if not to:
+                    legalTransitions[transVar] = {}
+                    continue
+                for k in W:
+                    if next(iter(to)) in k:
+                        legalTransitions[transVar] = k
+                        break
+
+            for q in A:
+                if self.isQBehaviorLegal(q, W, legalTransitions):
+                    behav1.add(q)
+
+            behav2 = A.difference(behav1)
+            W.pop()
+            if behav1: W.appendleft(frozenset(behav1))
+            if behav2: W.appendleft(frozenset(behav2))
+            if behav1 and behav2:
+                unusefulRounds = 0
+            else:
+                unusefulRounds += 1
+
         print("     Done")
-        print("     New number of states:",len(W))
+        print("     New number of states:", len(W))
 
         # Now make transitions:
         minDfa = TransitionTable()
@@ -398,21 +461,44 @@ class TransitionTable:
             isFromAccept = any(x in self.acceptStates for x in newFrom)
             for from_ in newFrom:
                 for transVar in self.transNames.keys():
-                    to = self.get(from_,transVar)
+                    to = self.get(from_, transVar)
                     if not to:
                         continue
                     for newToCand in W:
                         toItem = next(iter(to))
                         if toItem in newToCand:
-                            isToInit = any(x in self.initStates for x in newToCand)
-                            isToAccept = any(x in self.acceptStates for x in newToCand)
-                            newToCandName = gen.gen_state_name(frozenset(newToCand))
-                            finalTransVar = transVar if not isToAccept else transVar + ","+self.labelMap[toItem]
-                            minDfa.make_transition(newFromName,newToCandName, finalTransVar,isFromAccept,isFromInit,isToAccept,isToInit,self.gen_label(newFrom), self.gen_label(newToCand))
+                            isToInit = any(
+                                x in self.initStates for x in newToCand)
+                            isToAccept = any(
+                                x in self.acceptStates for x in newToCand)
+                            newToCandName = gen.gen_state_name(
+                                frozenset(newToCand))
+                            finalTransVar = transVar if not isToAccept else transVar + "," + self.labelMap[toItem]
+                            minDfa.make_transition(
+                                newFromName, newToCandName, finalTransVar,
+                                isFromAccept, isFromInit, isToAccept, isToInit,
+                                self.gen_label(newFrom),
+                                self.gen_label(newToCand))
 
         return minDfa
 
-        
+    def isQBehaviorLegal(self, q, W, legalTransitions):
+        for transVar in self.transNames:
+            setThatContainsTo = set()
+            to = self.get(q, transVar)
+            if not to:
+                setThatContainsTo = {}
+                if legalTransitions[transVar] != setThatContainsTo:
+                    return False
+                continue
+
+            for k in W:
+                if next(iter(to)) in k:
+                    setThatContainsTo = k
+                    break
+            if legalTransitions[transVar] != setThatContainsTo:
+                return False
+        return True
 
     #Similar to epsilon removal, but now i don't have to take epsilon transitions anymore.
     #TODO: Maybe merge both algorithms? Code redundancy is an issue here.
@@ -421,9 +507,11 @@ class TransitionTable:
         gen = NameGen()
         frozenInitStates = frozenset(self.initStates)
         activeSimulatedStates = {frozenInitStates}
-        generatedStates = {frozenInitStates : gen.gen_state_name(frozenInitStates)}
+        generatedStates = {
+            frozenInitStates: gen.gen_state_name(frozenInitStates)
+        }
         print("     Removing Epsilon Transitions...")
-        self = self.remove_epsilon_trans() 
+        self = self.remove_epsilon_trans()
         print("     Done")
         print("     Computing DFA...")
         dfa = TransitionTable()
@@ -440,50 +528,62 @@ class TransitionTable:
                 isToInit = False
                 toSetLabel = ""
                 for state in stateFromSet:
-                    stateToSet = self.get(state,trans)
-                    if stateToSet: 
-                        collectedSimulatedStates = collectedSimulatedStates.union(stateToSet)
-                        isToAccept = any(x in self.acceptStates for x in stateToSet) or isToAccept
-                        isToInit = any(x in self.initStates for x in stateToSet) or isToInit
-                        toSetLabel = self.gen_label(stateToSet)
+                    stateToSet = self.get(state, trans)
+                    collectedSimulatedStates = collectedSimulatedStates.union(
+                        stateToSet)
+                    isToAccept = any(x in self.acceptStates
+                                     for x in stateToSet) or isToAccept
+                    isToInit = any(x in self.initStates
+                                   for x in stateToSet) or isToInit
+                    toSetLabel += self.gen_label(stateToSet)
                 if not collectedSimulatedStates: continue
                 frozenCollectedStates = frozenset(collectedSimulatedStates)
-                if not frozenCollectedStates in generatedStates: 
+                if not frozenCollectedStates in generatedStates:
                     newStateSetName = gen.gen_state_name(frozenCollectedStates)
-                    dfa.make_transition(stateFromSetName,newStateSetName,trans,isFromAccept,isFromInit,isToAccept,isToInit,fromSetLabel,toSetLabel)
+                    dfa.make_transition(stateFromSetName, newStateSetName,
+                                        trans, isFromAccept, isFromInit,
+                                        isToAccept, isToInit, fromSetLabel,
+                                        toSetLabel)
                     activeSimulatedStates.add(frozenCollectedStates)
                     generatedStates[frozenCollectedStates] = newStateSetName
                 else:
                     newStateSetName = generatedStates[frozenCollectedStates]
-                    dfa.make_transition(stateFromSetName,newStateSetName,trans,isFromAccept,isFromInit,isToAccept,isToInit,fromSetLabel,toSetLabel)
+                    dfa.make_transition(stateFromSetName, newStateSetName,
+                                        trans, isFromAccept, isFromInit,
+                                        isToAccept, isToInit, fromSetLabel,
+                                        toSetLabel)
 
         print("     Done")
-        return dfa     
+        print("     Number of states:", len(dfa.stateNames))
+        draw_fa(dfa,"DFA")
+        return dfa
+
 
 class NFA:
     def __init__(self):
         self.make_init()
         self.make_accept()
         self.__transtable_dirty = True
-        self.__transTable = TransitionTable() 
+        self.__transTable = TransitionTable()
 
     def make_init(self):
-        self.initState = State(isInitState = True)
+        self.initState = State(isInitState=True)
         return self.initState
 
     def make_accept(self):
-        self.acceptState = State(isAcceptState = True)
+        self.acceptState = State(isAcceptState=True)
         return self.acceptState
 
 # TODO: Probably performance considerations (settings transtable dirty and not dirty by only accessing a state.)
 #### Setter & Getter
+
     @property
     def initState(self):
         self.__transtable_dirty = True
         return self.__initState
 
     @initState.setter
-    def initState(self,value):
+    def initState(self, value):
         self.__transtable_dirty = True
         self.__initState = value
 
@@ -493,21 +593,25 @@ class NFA:
         return self.__acceptState
 
     @acceptState.setter
-    def acceptState(self,value):
+    def acceptState(self, value):
         self.__transtable_dirty = True
         self.__acceptState = value
 
     @property
     def transitionTable(self):
-        def iterateCallback(from_,to,nameFrom,nameTo,transVar):
-            self.__transTable.make_transition(nameFrom, nameTo,transVar,from_.isAccept(),from_.isInit(), to.isAccept(), to.isInit(),from_.label,to.label)
-        
+        def iterateCallback(from_, to, nameFrom, nameTo, transVar):
+            self.__transTable.make_transition(nameFrom, nameTo, transVar,
+                                              from_.isAccept(), from_.isInit(),
+                                              to.isAccept(), to.isInit(),
+                                              from_.label, to.label)
+
         if self.__transtable_dirty:
             self.__transTable = TransitionTable()
             self.iterateGraph(iterateCallback)
             self.__transtable_dirty = False
         return self.__transTable
-         
+
+
 #### End
 
     def copy(self, other):
@@ -515,15 +619,15 @@ class NFA:
         self.initState = other.initState
 
     def concatV2(self, other):
-        for (stateIn, trans) in list(self.acceptState.iterateInNeighbours()):  #iterate over copy because disconnect changes the iterator!
+        for (stateIn, trans) in list(self.acceptState.iterateInNeighbours(
+        )):  #iterate over copy because disconnect changes the iterator!
             stateIn.disconnect(self.acceptState, trans.transVar)
             stateIn.connectTo(other.initState, trans.transVar)
-        
+
         self.acceptState = other.acceptState
 
     def concatV1(self, other):
         self.acceptState.connectTo(other.initState)
-       
 
     def union(self, other):
         out = NFA()
@@ -545,24 +649,25 @@ class NFA:
         out = NFA()
         out.initState.connectTo(out.acceptState)
         out.initState.connectTo(self.initState)
-        self.acceptState.connectTo(out.initState, allowMultipleTransitionToInitState=False) # Make sure we can keep the init state even though now a transition goes back to it (Thompson's construction originally doesn't need this, so that's why I added this option)
+        self.acceptState.connectTo(
+            out.initState, allowMultipleTransitionToInitState=False
+        )  # Make sure we can keep the init state even though now a transition goes back to it (Thompson's construction originally doesn't need this, so that's why I added this option)
         self.copy(out)
 
     def plus(self):
         self.starV1()
-        self.initState.disconnect(self.acceptState,":e:")
+        self.initState.disconnect(self.acceptState, ":e:")
 
     def symbol(self, a):
         self.initState.connectTo(self.acceptState, a)
-    
+
     def questionmark(self):
         out = NFA()
         out.initState.connectTo(out.acceptState)
         out.initState.connectTo(self.initState)
         self.acceptState.connectTo(out.acceptState)
         self.copy(out)
-         
-        
+
     # TODO: Improve in order to replace ugly dfs code everywhere
     def iterateGraph(self, callback):
         counter = 0
@@ -574,17 +679,17 @@ class NFA:
             visited[state] = counter
             strCounter = str(counter)
             counter += 1
-            for to,trans in state.iterateOutNeighbours():
+            for to, trans in state.iterateOutNeighbours():
                 if not to in visited:
                     inner(to)
-                callback( state,to,strCounter,str(visited[to]),trans.transVar )
+                callback(state, to, strCounter, str(visited[to]),
+                         trans.transVar)
 
         return inner(self.initState)
 
-                               
 
 def make_nfa(expr):
-    if expr.isConcat():  
+    if expr.isConcat():
         dfaLhs = make_nfa(expr.lhs)
         dfaRhs = make_nfa(expr.rhs)
         dfaLhs.concatV2(dfaRhs)
@@ -626,7 +731,7 @@ def draw_expr(expr, title="Standard Expression"):
         OPType.Concat: "@",
         OPType.Union: "|",
         OPType.Symbol: "S",
-        OPType.Questionmark : "?"
+        OPType.Questionmark: "?"
     }
     counter = 0
 
@@ -652,13 +757,14 @@ def draw_expr(expr, title="Standard Expression"):
     inner(expr)
     graph.view()
 
+
 #TODO: Draw based on transition table, don't do a dfs!
 def draw_fa(ttable, title="Standard FA"):
     from graphviz import Graph, Digraph
     graph = Digraph(title, filename=title)
     graph.attr(rankdir='LR', size="50")
-   
-    for isInit,isAccept,state,label in ttable.iterateStates():
+
+    for isInit, isAccept, state, label in ttable.iterateStates():
         shape_ = "circle"
         color_ = "black"
         if isAccept:
@@ -666,46 +772,51 @@ def draw_fa(ttable, title="Standard FA"):
         if isInit:
             color_ = "blue"
         if label:
-            graph.node(state,shape=shape_,color=color_, label=label)
+            graph.node(state, shape=shape_, color=color_, label=label)
         else:
-            graph.node(state,shape=shape_,color=color_)
+            graph.node(state, shape=shape_, color=color_)
 
-
-    for from_,to,transVar in ttable.iterateTransitions():
-        graph.edge(from_,to,transVar)
+    for from_, to, transVar in ttable.iterateTransitions():
+        graph.edge(from_, to, transVar)
 
     graph.view()
 
+
 ##### C++ generation
 
-def extract(text,kw):
+
+def extract(text, kw):
     pos = text.find(kw)
     if pos < 0:
         return []
-    
+
     extractBlock = text[pos:]
-    start = extractBlock.find("<start>")+8 # 8 == number of chars of <start> + newline
+    start = extractBlock.find(
+        "<start>") + 8  # 8 == number of chars of <start> + newline
     end = extractBlock.find("</end>")
-    return filter(bool,extractBlock[start:end].split("\n"))
+    return filter(bool, extractBlock[start:end].split("\n"))
+
 
 def parse_source(filename):
     spec = open(filename).read()
-    ids = extract(spec,"id")
-    ids = map(lambda x: (x,x),ids)
-    map_backs = extract(spec,"map_back")
-    capture_lexemes = extract(spec,"capture_lexeme")
+    ids = extract(spec, "id")
+    ids = map(lambda x: (x.capitalize(), x), ids)
+    defaults = extract(spec, "default")
+    specialTokens = extract(spec, "expansion")
     toTuple = lambda transList: map(lambda x: (x[0].replace(" ",""), x[1].replace(" ","")),map(lambda x: x.split("-",maxsplit=1), transList))
-    map_backs = toTuple(map_backs)
-    capture_lexemes = toTuple(capture_lexemes)
-    return chain(ids,map_backs,capture_lexemes)
+    defaults = toTuple(defaults)
+    specialTokens = {x: y for x, y in toTuple(specialTokens)}
+    return (chain(ids, defaults), specialTokens)
+
 
 class CPPLexer:
     def __init__(self, dfaTable):
-       
+
         includes = """
         #pragma once
         #include <string>
-        #include <cassert>\n\n
+        #include <cassert>
+        #include <cctype>\n\n
         """
 
         tokenInformationStruct = """
@@ -760,6 +871,7 @@ class CPPLexer:
                 std::string filename = provider.CurrentFilename();
                 size_t startedLine = provider.CurrentLine();
                 size_t startedPosition = provider.CurrentCursorPos();
+                int pushedToken = 0;
                 <definition_assign_next_token>
             }
         };"""
@@ -767,56 +879,110 @@ class CPPLexer:
         self.dfaTable = dfaTable
 
         method_def, tokenTypesCode = self.genCode()
-        lexerClass = lexerClass.replace("<definition_assign_next_token>", method_def)
-        tokenTypeEnum = tokenTypeEnum.replace("<definition_token_type_enum>", tokenTypesCode)
+        lexerClass = lexerClass.replace("<definition_assign_next_token>",
+                                        method_def)
+        tokenTypeEnum = tokenTypeEnum.replace("<definition_token_type_enum>",
+                                              tokenTypesCode)
 
         self.generatedCode = includes + tokenTypeEnum + tokenInformationStruct + lexerClass
 
     def save(self, filename):
-        f = open(filename,"w")
+        f = open(filename, "w")
         f.write(self.generatedCode)
         f.close()
 
+    def unpackTransVar(self, transInfo):
+        separatingCommaPos = transInfo.rfind(",")
+        transVar = transInfo
+        transLabel = ""
+        if separatingCommaPos > 0 and len(transVar) > 1:
+            transVar = transInfo[0:separatingCommaPos]
+            transLabel = transInfo[separatingCommaPos + 1:len(transInfo)]
+        return (transVar, transLabel)
+
+    def getOptimizedCode(self, key, charsToCompare):
+        to, pushedToken = key
+        # Gen optimized expressions
+        digitCounter = 0
+        digitExpressions = []
+
+        alphabetCounter = 0
+        alphaExpressions = []
+
+        expressions = []
+
+        for x in charsToCompare:
+            if x.isdigit():
+                num = ord(x)
+                digitCounter += num
+                digitExpressions.append("c == '{0}'".format(x))
+            elif x.isalpha():
+                unicodeInt = ord(x)
+                alphabetCounter += unicodeInt
+                alphaExpressions.append("c == '{0}'".format(x))
+            else:
+                expressions.append("c == '{0}'".format(x))
+
+        if alphabetCounter == 4862:  # Sum of all ascii_letters.
+            alphaExpressions = ["isalpha(c)"]
+        elif alphabetCounter > 4862:
+            raise RuntimeError("This shouldn't happen as the fa is a dfa!")
+        
+        if digitCounter == 525:  # sum of "1"..."9" (unicode)
+            digitExpressions = ["isdigit(c)"]
+        elif digitCounter > 525:
+            raise RuntimeError("This shouldn't happen as the fa is a dfa!")
+
+        expressions.extend(alphaExpressions)
+        expressions.extend(digitExpressions)
+
+        out = "if("
+        for expr in expressions:
+            out += expr + "||"
+        out = out[0:-2] + ")"
+        # body
+        if pushedToken:
+            out += "{{matched_word += c; c = provider.Next(); pushedToken = TokenType::{0}; goto state{1}; }}".format(
+                pushedToken, to)
+        else:
+            out += "{{matched_word += c; c = provider.Next(); goto state{0}; }}".format(to)
+
+        return out
 
     def genCode(self):
         stateCode = []
         tokenTypeCode = set()
-        for isInit,isAccept,state,label in self.dfaTable.iterateStates():
-            # state is a unique name, label isn't; If accepting state the label should go into the enum defintions.
-            transition = "state{0}:\n".format(state)
-            for to, transitionInfo in self.dfaTable.iterateTransitionsFor(state):
-                if not to in self.dfaTable.acceptStates:  
-                    transition += "if (c == '{0}') {{c = provider.Next();goto state{1};}}\n".format(transitionInfo,int(to))
-                else:
-                    separatingCommaPos = transitionInfo.rfind(",")
-                    transVar = transitionInfo[0:separatingCommaPos]
-                    tokenToPush = transitionInfo[separatingCommaPos+1:len(transitionInfo)]
-                    transition += "if (c == '{0}') {{c = provider.Next();pushedToken = TokenType::{1}; goto state{2};}}\n".format(transVar,tokenToPush,to)
-                    tokenTypeCode.add(tokenToPush)
+        draw_fa(self.dfaTable)
+        for isInit, isAccept, state, label in self.dfaTable.iterateStates():
+            transitionExpressions = {}
+            optimCode = "state{0}:\n".format(state)
+            for to, transVar in self.dfaTable.iterateTransitionsFor(state):
+                var, label = self.unpackTransVar(transVar)
+                if label: tokenTypeCode.add(label)
+                if not (to, label) in transitionExpressions:
+                    transitionExpressions[(to, label)] = set()
+                transitionExpressions[(to, label)].add(var)
 
-            if isAccept: # None of the previous transitions matched. If it is an accepting state, accept the string and return 
-                transition += """
-                                if (isspace(c)) while( isspace(c=provider.Next()));
-                                current_token_info = { pushedToken,  matched_word, filename, startedLine, startedPosition }; 
-                                next_char = c;
-                                return;"""
-            else:
-                transition += "assert(false);" #Proper error handling soon.
-            transition+="\n\n\n"
-            stateCode.append(transition)
-        
-        methodDefinition = "".join(stateCode)
-        tokenTypeDefinition = ",".join(tokenTypeCode)
-        return (methodDefinition,tokenTypeDefinition)
+            for key, charsToCompare in transitionExpressions.items():
+                optimCode += self.getOptimizedCode(key, charsToCompare) + "\n"
 
-    
+            optimCode += """         if (isspace(c)) while( isspace(c=provider.Next()));
+                                    current_token_info = { pushedToken,  matched_word, filename, startedLine, startedPosition }; 
+                                    next_char = c;
+                                    return;\n\n"""
+            stateCode.append(optimCode)
 
-def emit_code(tokenSpec,pathToSave):
+
+        return ("".join(stateCode), ",".join(tokenTypeCode))
+
+
+def emit_code(tokenSpec, pathToSave):
     automataList = []
     print("Creating sub NFAs...")
-    for i in tokenSpec:
-        label,expr = i
-        enfa = make_nfa(make_expr(expr))
+    spec, specialTokenMap = tokenSpec
+    for i in spec:
+        label, expr = i
+        enfa = make_nfa(make_expr(expr, specialTokenMap))
         enfa.acceptState.label = label
         automataList.append(enfa)
     print("Done")
@@ -827,28 +993,18 @@ def emit_code(tokenSpec,pathToSave):
         enfa.union(i)
     print("Done")
     print("Tranforming NFA to DFA...")
-
     dfaTable = enfa.transitionTable.to_min_dfa()
     print("Done")
     print("Emitting CPP Code...")
-    #draw_fa(dfaTable)
     genLexer = CPPLexer(dfaTable)
     print("Done")
     genLexer.save(pathToSave)
-    
 
-def gen_lexer(specFile, outFile):
+
+def make_lexer(specFile, outFile):
     a = parse_source(specFile)
-    emit_code(a,outFile)
+    emit_code(a, outFile)
 
 
-
-
-
-
-
-
-
-
-
-
+make_lexer("C:/Users/Jan_M720/Desktop/TokenHiraeth.txt",
+           "E:/C++Projects/Hiraeth/src/HiraethLexer.h")
