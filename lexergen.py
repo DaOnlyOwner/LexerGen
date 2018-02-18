@@ -4,6 +4,8 @@ from itertools import chain
 from functools import reduce
 from collections import deque
 import string
+import codecs
+
 
 class OPType(Enum):
     Star = 1
@@ -17,22 +19,34 @@ class OPType(Enum):
 def tokenize(txt):
     out = []
     colonActive = False
+    apostropheActive = False
     numParen = 0
     specialChar = ""
     handleAsSymbol = False
 
+
+
     for c in txt:
-        if handleAsSymbol or c == '°':
+        if handleAsSymbol:
+            out.append("°")
             out.append(c)
             handleAsSymbol = not handleAsSymbol
-            continue
+        
 
-        if colonActive:
+        elif colonActive:
             specialChar += c
             if c == ':':
                 out.append(specialChar)
                 colonActive = False
                 specialChar = ""
+        
+        elif apostropheActive:
+            if c == "'":
+                out.append(specialChar)
+                apostropheActive = False
+                specialChar = ""
+                
+            else: specialChar += c
 
         elif numParen > 0:
             specialChar += c
@@ -51,6 +65,12 @@ def tokenize(txt):
             elif c == "(":
                 numParen += 1
                 specialChar = "("
+
+            elif c == "'":
+                apostropheActive = True
+            elif c == "°":
+                handleAsSymbol = True
+
             else:
                 out.append(c)
 
@@ -106,7 +126,7 @@ def make_expr(expr, specialTokenMap={}):
                     "+") or subExpr.startswith("?"):
                 if (len(treeList) == 0):
                     raise ValueError(
-                        "Expected a left hand operand when parsing */+, but none was given"
+                        "Expected a left hand operand when parsing */+/?, but none was given"
                     )
                 lhs = treeList.pop()
                 parentExpr = Expression(operandMap[subExpr[0]], lhs)
@@ -504,7 +524,7 @@ class TransitionTable:
                                 isFromAccept, isFromInit, isToAccept, isToInit,
                                 self.gen_label(newFrom),
                                 self.gen_label(newToCand))
-        #draw_fa(minDfa,"Min DFA")
+        draw_fa(minDfa,"Min DFA")
         return minDfa
 
     def isQBehaviorLegal(self, q, W, legalTransitions):
@@ -849,10 +869,11 @@ class TransitionOptimizer:
         self.optimFunc = optimFunc
         self.sumOfChars = sum(map(lambda x: ord(x),chars))
     
-    def check(self, x):
-        if self.optimFunc(x):
+    def check(self, char):
+        if self.optimFunc(char):
+            x = codecs.decode(char, 'unicode_escape')
             self.counter += ord(x)
-            self.savedExpressions.append("c == '{0}'".format(x))
+            self.savedExpressions.append("c == '{0}'".format(char))
             return True
         return False
     
@@ -889,6 +910,7 @@ class CPPLexer:
         {
             enum
             {
+                UnknownToken,
                 <definition_token_type_enum>
             };
         };"""
@@ -898,9 +920,11 @@ class CPPLexer:
         class Lexer
         {
         public:
-            Lexer(TSourceCodeProvider&& provider_) : provider(std::move(provider_)) 
+            TSourceCodeProvider SourceProvider;
+
+            Lexer(TSourceCodeProvider&& provider) : SourceProvider(std::move(provider)) 
             {
-                next_char = provider.Next();
+                next_char = SourceProvider.Next();
             }
 
             TokenInfo Eat()
@@ -916,16 +940,15 @@ class CPPLexer:
             }
 
         private:
-            TSourceCodeProvider provider;
             TokenInfo current_token_info;
             char next_char;
             void assign_next_token()
             {
-                char c = next_char;
+                char c = next_char; 
                 std::string matched_word;
-                std::string filename = provider.CurrentFilename();
-                size_t startedLine = provider.CurrentLine();
-                size_t startedPosition = provider.CurrentCursorPos();
+                std::string filename = SourceProvider.CurrentFilename();
+                size_t startedLine = SourceProvider.CurrentLine();
+                size_t startedPosition = SourceProvider.CurrentCursorPos();
                 int pushedToken = 0;
                 <definition_assign_next_token>
             }
@@ -980,17 +1003,18 @@ class CPPLexer:
         out = out[0:-2] + ")"
         # body
         if pushedToken:
-            out += "{{matched_word += c; c = provider.Next(); pushedToken = TokenType::{0}; goto state{1}; }}".format(
+            out += "{{matched_word += c; c = SourceProvider.Next(); pushedToken = TokenType::{0}; goto state{1}; }}".format(
                 pushedToken, to)
         else:
-            out += "{{matched_word += c; c = provider.Next(); goto state{0}; }}".format(to)
+            out += "{{matched_word += c; c = SourceProvider.Next(); goto state{0}; }}".format(to)
 
         return out
 
     def genCode(self):
+        #draw_fa(self.dfaTable)
         stateCode = []
         tokenTypeCode = set()
-        #draw_fa(self.dfaTable)
+        startStateCode = ""
         for isInit, isAccept, state, label in self.dfaTable.iterateStates():
             transitionExpressions = {}
             optimCode = "state{0}:\n".format(state)
@@ -1004,14 +1028,21 @@ class CPPLexer:
             for key, charsToCompare in transitionExpressions.items():
                 optimCode += self.getOptimizedCode(key, charsToCompare) + "\n"
 
-            optimCode += """         if (isspace(c)) while( isspace(c=provider.Next()));
-                                    current_token_info = { pushedToken,  matched_word, filename, startedLine, startedPosition }; 
-                                    next_char = c;
-                                    return;\n\n"""
             if isAccept:
-                stateCode.append(optimCode)
+                optimCode += """         if (isspace(c)) while( isspace(c=SourceProvider.Next()));
+                                        current_token_info = { pushedToken,  matched_word, filename, startedLine, startedPosition }; 
+                                        next_char = c;
+                                        return;\n\n"""
             else:
+                optimCode += """        if (isspace(c)) while( isspace(c=SourceProvider.Next()));
+                                        current_token_info = { TokenType::UnknownToken, matched_word, filename, startedLine, startedPosition };
+                                        next_char = c;
+                                        return;\n\n"""
+
+            if isInit:
                 stateCode.insert(0,optimCode)
+            else:
+                stateCode.append(optimCode)
 
         return ("".join(stateCode), ",".join(tokenTypeCode))
 
