@@ -393,6 +393,7 @@ class TransitionTable:
             isFromAccept = any(x in self.acceptStates for x in stateFromSet)
             isFromInit = any(x in self.initStates for x in stateFromSet)
             labelFromSet = self.gen_label(stateFromSet)
+            #print("labelFromSet:", labelFromSet)
             # Try to transit deterministically and then take all :e: transitions
             for state in stateFromSet:
                 for trans in self.transNames:
@@ -406,6 +407,7 @@ class TransitionTable:
                         isToInit = any(
                             x in self.initStates for x in stateToSet)
                         labelToSet = self.gen_label(stateToSet)
+                        #print("labelToSet: ", labelToSet)
                         if not stateToSet in generatedStates:
                             stateToSetName = gen.gen_state_name(stateToSet)
                             nfa.make_transition(
@@ -438,11 +440,12 @@ class TransitionTable:
             return maxItem
 
         else: # Fallback
-            label = ""
+            labels = set()
             for state in states:
-                if not self.labelMap[state] in label:
-                    label += self.labelMap[state] + ","
-            return label[0:-1]
+                labelOld = self.labelMap[state]
+                if not labelOld: continue
+                labels.add(labelOld)
+            return ",".join(labels)
 
     def to_min_dfa(self,precedenceRules):
         self = self.to_dfa(precedenceRules)
@@ -524,7 +527,7 @@ class TransitionTable:
                                 isFromAccept, isFromInit, isToAccept, isToInit,
                                 self.gen_label(newFrom),
                                 self.gen_label(newToCand))
-        draw_fa(minDfa,"Min DFA")
+        #draw_fa(minDfa,"Min DFA")
         return minDfa
 
     def isQBehaviorLegal(self, q, W, legalTransitions):
@@ -569,11 +572,12 @@ class TransitionTable:
             isFromAccept = any(x in self.acceptStates for x in stateFromSet)
             isFromInit = any(x in self.initStates for x in stateFromSet)
             fromSetLabel = self.gen_label(stateFromSet,cmpFunc)
+            #print("FromSetLabel: ", fromSetLabel)
             for trans in self.transNames:
                 collectedSimulatedStates = set()
                 isToAccept = False
                 isToInit = False
-                toSetLabel = ""
+                allLabeledStates = set()
                 for state in stateFromSet:
                     stateToSet = self.get(state, trans)
                     collectedSimulatedStates = collectedSimulatedStates.union(
@@ -582,7 +586,9 @@ class TransitionTable:
                                      for x in stateToSet) or isToAccept
                     isToInit = any(x in self.initStates
                                    for x in stateToSet) or isToInit
-                    if isToAccept: toSetLabel += self.gen_label(stateToSet,cmpFunc)
+                    
+                    if isToAccept: allLabeledStates.update(stateToSet) 
+                toSetLabel = self.gen_label(allLabeledStates,cmpFunc)
                 if not collectedSimulatedStates: continue
                 frozenCollectedStates = frozenset(collectedSimulatedStates)
                 if not frozenCollectedStates in generatedStates:
@@ -770,6 +776,7 @@ def make_nfa(expr):
 
 
 def draw_expr(expr, title="Standard Expression"):
+    from graphviz import Graph
     graph = Graph(title, filename=title)
     graph.attr(rankdir="TD", size="50")
     typeMapper = {
@@ -807,7 +814,7 @@ def draw_expr(expr, title="Standard Expression"):
 
 #TODO: Draw based on transition table, don't do a dfs!
 def draw_fa(ttable, title="Standard FA"):
-    from graphviz import Graph, Digraph
+    from graphviz import Digraph
     graph = Digraph(title, filename=title)
     graph.attr(rankdir='LR', size="50")
 
@@ -892,7 +899,8 @@ class CPPLexer:
         #pragma once
         #include <string>
         #include <cassert>
-        #include <cctype>\n\n
+        #include <cctype>
+        #include <map>\n\n
         """
 
         tokenInformationStruct = """
@@ -913,6 +921,20 @@ class CPPLexer:
                 UnknownToken,
                 <definition_token_type_enum>
             };
+
+            std::string GetNameFromToken(int tokenType)
+            {
+                static std::map<int,std::string> nameMap = 
+                {
+                    <map_back_definition_here>
+                };
+
+                auto it = nameMap.find(tokenType);
+                if (it != nameMap.end()) return it->second;
+                else return "UnknownToken";
+
+            }
+
         };"""
 
         lexerClass = """
@@ -925,6 +947,7 @@ class CPPLexer:
             Lexer(TSourceCodeProvider&& provider) : SourceProvider(std::move(provider)) 
             {
                 next_char = SourceProvider.Next();
+                assign_next_token();
             }
 
             TokenInfo Eat()
@@ -956,11 +979,12 @@ class CPPLexer:
 
         self.dfaTable = dfaTable
 
-        method_def, tokenTypesCode = self.genCode()
+        method_def, tokenTypesCode,tokenNamesMap = self.genCode()
         lexerClass = lexerClass.replace("<definition_assign_next_token>",
                                         method_def)
         tokenTypeEnum = tokenTypeEnum.replace("<definition_token_type_enum>",
                                               tokenTypesCode)
+        tokenTypeEnum = tokenTypeEnum.replace("<map_back_definition_here>", tokenNamesMap)
 
         self.generatedCode = includes + tokenTypeEnum + tokenInformationStruct + lexerClass
 
@@ -1013,14 +1037,16 @@ class CPPLexer:
     def genCode(self):
         #draw_fa(self.dfaTable)
         stateCode = []
+        tokenNamesMap = set()
         tokenTypeCode = set()
-        startStateCode = ""
         for isInit, isAccept, state, label in self.dfaTable.iterateStates():
             transitionExpressions = {}
             optimCode = "state{0}:\n".format(state)
             for to, transVar in self.dfaTable.iterateTransitionsFor(state):
                 var, label = self.unpackTransVar(transVar)
-                if label: tokenTypeCode.add(label)
+                if label: 
+                    tokenTypeCode.add(label)
+                    tokenNamesMap.add('{{ TokenType::{0}, "{1}" }}'.format(label,label))
                 if not (to, label) in transitionExpressions:
                     transitionExpressions[(to, label)] = set()
                 transitionExpressions[(to, label)].add(var)
@@ -1044,7 +1070,7 @@ class CPPLexer:
             else:
                 stateCode.append(optimCode)
 
-        return ("".join(stateCode), ",".join(tokenTypeCode))
+        return ("".join(stateCode), ",".join(tokenTypeCode), ",".join(tokenNamesMap))
 
 
 def emit_code(tokenSpec, pathToSave):
